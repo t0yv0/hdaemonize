@@ -2,11 +2,15 @@ Name:		hdaemonize
 Version:	0.1
 Cabal-Version:  >= 1.2
 License:	BSD3
+License-file:   LICENSE
 Author:         Anton Tayanovskyy
 Maintainer:     Anton Tayanovskyy <name.surname@gmail.com>
 Homepage:       http://github.com/toyvo/hdaemonize/tree/master
 Category:	System
-Synopsis:       Utilities for UNIX daemon writing
+Synopsis:       utilities for UNIX daemon writing
+Description:	Provides a daemonize function that turns a program into a UNIX daemon,
+		does the double fork dance, writes the PID file, drops priviledges,
+		handles start, stop, restart and reload command-line arguments.
 Build-Type:	Simple
 Library
 
