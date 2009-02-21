@@ -1,6 +1,9 @@
 module System.Posix.Daemonize 
     (daemonize, Logger, Program(..), defaultProgram) where
 
+{- originally based on code from 
+   http://sneakymustard.com/2008/12/11/haskell-daemons -}
+
 import Control.Exception
 import System
 import System.Directory
@@ -73,11 +76,10 @@ daemonize program = do name <- getProgName
                 error "PID file exists. Process already running?"
                 exitFailure
 
-            p2 = 
-                do createSession
-                   pid <- forkProcess p3
-                   pidWrite name pid
-                   exitSuccess        
+            p2 = do createSession
+                    pid <- forkProcess p3
+                    pidWrite name pid
+                    exitSuccess        
 
             p3 = withSyslog name [] DAEMON $ 
                 do setCurrentDirectory "/"
