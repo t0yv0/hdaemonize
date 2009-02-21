@@ -31,7 +31,7 @@ defaultProgram = Program pass pass pass
 --   the system log, writing a /var/run/$name.pid file, which
 --   guarantees that only one instance is running, dropping
 --   priviledges to $name:$name or daemon:daemon if $name is not
---   available, and handling start/stop/restart/reload command-line
+--   available, and handling start, stop, restart and reload command-line
 --   arguments. The stop argument does a soft kill first, and if that
 --   fails for 1 second, does a hard kill.
 daemonize :: (Logger -> IO Program) -> IO ()
