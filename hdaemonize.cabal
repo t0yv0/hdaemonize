@@ -2,7 +2,8 @@ Name:		hdaemonize
 Version:	0.1
 Cabal-Version:  >= 1.2
 License:	BSD3
-Author:         Anton Tayanovskyy
+Author:         Anton Tayanovskyy <name.surname@gmail.com>
+Homepage:       http://github.com/toyvo/hdaemonize/tree/master
 Category:	System
 Synopsis:       Utilities for UNIX daemon writing
 Build-Type:	Simple
