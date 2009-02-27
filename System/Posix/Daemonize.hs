@@ -1,4 +1,4 @@
-module System.Posix.Daemonize (Logger, Program, daemonize) where
+module System.Posix.Daemonize (Logger, Program, daemonize, serviced) where
       
 {- originally based on code from 
    http://sneakymustard.com/2008/12/11/haskell-daemons -}
@@ -7,30 +7,82 @@ import Control.Concurrent
 import Control.Exception
 import Prelude hiding (catch)
 import System
+import System.Exit
 import System.Posix
 import System.Posix.Syslog
+
 
 -- | The simplest possible interface to syslog.
 type Logger = String -> IO ()
 
--- | A program type.
+
+-- | A program is any IO computation. It also accepts a syslog handle.
 type Program = Logger -> IO ()
 
--- | Turns a program into a UNIX daemon, doing the necessary daemon
---   rain dance, providing it with the simplest possible interface to
---   the system log, writing a /var/run/$name.pid file, which
---   guarantees that only one instance is running, dropping
---   priviledges to $name:$name or daemon:daemon if $name is not
---   available, and handling start, stop, restart command-line
---   arguments. The stop argument does a soft kill first, and if that
---   fails for 1 second, does a hard kill.
-daemonize :: Program -> IO ()
-daemonize program = do name <- getProgName
-                       args <- getArgs
-                       process name args
+
+-- | Daemonizes a given IO computation by forking twice, closing
+--   standard file descriptors, blocking sigHUP, setting file creation
+--   mask, starting a new session, and changing the working directory
+--   to root.
+
+daemonize :: IO () ->  IO () 
+daemonize program = 
+
+    do setFileCreationMask 0 
+       forkProcess p
+       exitSuccess
+
     where
 
-      process name ["start"] = startd name
+      p  = do createSession
+              forkProcess p'
+              exitSuccess
+                              
+      p' = do changeWorkingDirectory "/"
+              closeFileDescriptors
+              blockSignal sigHUP
+              program
+
+
+-- | Turns a program into a UNIX daemon (system service) ready to be
+--   deployed to /etc/rc.d or similar startup folder.  The resulting
+--   program handles command-line arguments (start, stop, or restart).
+--
+--   With start option it writes out a PID to /var/run/$name.pid where
+--   $name is the executable name. If PID already exists, it refuses
+--   to start, guaranteeing there is only one live instance.
+--
+--   With stop option it reads the PID from /var/run/$name.pid and
+--   terminates the corresponding process (first a soft kill, SIGTERM,
+--   then a hard kill, SIGKILL).
+--
+--   Another addition over the daemonize function is dropping
+--   privileges.  If a system user and group with a name that matches
+--   the executable name exist, privileges are dropped to that user and
+--   group.  Otherwise, they are dropped to the standard daemon user
+--   and group.
+--
+--   Finally, exceptions in the program are caught, logged to syslog,
+--   and the program restarted.
+
+serviced :: Program -> IO ()
+serviced program = do name <- getProgName
+                      args <- getArgs
+                      process name args
+    where
+
+      program' name = withSyslog name [] DAEMON $
+                      do let log = syslog Notice
+                         log "starting"
+                         pidWrite name
+                         dropPrivileges name
+                         forever log program
+
+      process name ["start"] = pidExists name >>= f where
+          f True  = do error "PID file exists. Process already running?"
+                       exitFailure
+          f False = daemonize (program' name)
+                 
       process name ["stop"]  = 
           do pid <- pidRead name
              let ifdo x f = x >>= \x -> if x then f else pass
@@ -44,43 +96,22 @@ daemonize program = do name <- getProgName
                                ifdo (pidLive pid) (signalProcess sigKILL pid))
                    `finally`
                    removeLink (pidFile name)
+
       process name ["restart"] = do process name ["stop"]
                                     process name ["start"]
       process name _ = 
           putStrLn $ "usage: " ++ name ++ " {start|stop|restart}"
 
-      startd name = pidExists name >>= p1
-          where
 
-            p1 False = 
-                do setFileCreationMask 0 
-                   forkProcess p2
-                   exitImmediately ExitSuccess
+{- implementation -}
 
-            p1 True = 
-                error "PID file exists. Process already running?"
-                exitImmediately ExitFailure
-
-            p2 = do createSession
-                    pid <- forkProcess p3
-                    pidWrite name pid
-                    exitImmediately ExitSuccess
-
-            p3 = withSyslog name [] DAEMON $ 
-                do changeWorkingDirectory "/"
-                   dropPriviledges name
-                   closeFileDescriptors
-                   blockSignal sigHUP
-                   let log = syslog Notice 
-                   forever log (program log)
-
-forever :: Logger -> IO () -> IO ()
+forever :: Logger -> Program -> IO ()
 forever log program =     
-    program `catch` restart where
+    program log `catch` restart where
         restart :: SomeException -> IO () 
         restart e = 
-            do log ("Unexpected exception: " ++ show e)
-               log "Restarting in 5 seconds.."
+            do log ("unexpected exception: " ++ show e)
+               log "restarting in 5 seconds"
                usleep (5 * 10^6)
                forever log program
 
@@ -107,8 +138,8 @@ getUserID user =
         f (Left e)    = Nothing
         f (Right uid) = Just uid
 
-dropPriviledges :: String -> IO ()
-dropPriviledges name = 
+dropPrivileges :: String -> IO ()
+dropPrivileges name = 
     do Just ud <- getUserID "daemon"
        Just gd <- getGroupID "daemon"
        u       <- fmap (maybe ud id) $ getUserID name
@@ -127,8 +158,9 @@ pidRead name = pidExists name >>= choose where
     choose True  = fmap (Just . read) $ readFile (pidFile name)
     choose False = return Nothing
 
-pidWrite :: String -> CPid -> IO ()
-pidWrite name pid =
+pidWrite :: String -> IO ()
+pidWrite name =
+    getProcessID >>= \pid ->
     writeFile (pidFile name) (show pid)
 
 pidLive :: CPid -> IO Bool
