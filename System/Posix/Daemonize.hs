@@ -1,47 +1,37 @@
-module System.Posix.Daemonize 
-    (daemonize, Logger, Program(..), defaultProgram) where
-
+module System.Posix.Daemonize (Logger, Program, daemonize) where
+      
 {- originally based on code from 
    http://sneakymustard.com/2008/12/11/haskell-daemons -}
 
+import Control.Concurrent
 import Control.Exception
+import Prelude hiding (catch)
 import System
-import System.Directory
-import System.Exit
 import System.Posix
 import System.Posix.Syslog
 
 -- | The simplest possible interface to syslog.
 type Logger = String -> IO ()
 
--- | A program is defined by three things: start action, which is
---   called when the daemon starts; stop action, which is a TERM
---   signal handler; and reload, which is a SIGHUP signal handler.
-data Program = 
-    Program { start  :: IO (),
-              stop   :: IO (),
-              reload :: IO () }
-
--- | Default program does nothing.
-defaultProgram :: Program
-defaultProgram = Program pass pass pass
+-- | A program type.
+type Program = Logger -> IO ()
 
 -- | Turns a program into a UNIX daemon, doing the necessary daemon
 --   rain dance, providing it with the simplest possible interface to
 --   the system log, writing a /var/run/$name.pid file, which
 --   guarantees that only one instance is running, dropping
 --   priviledges to $name:$name or daemon:daemon if $name is not
---   available, and handling start, stop, restart and reload command-line
+--   available, and handling start, stop, restart command-line
 --   arguments. The stop argument does a soft kill first, and if that
 --   fails for 1 second, does a hard kill.
-daemonize :: (Logger -> IO Program) -> IO ()
+daemonize :: Program -> IO ()
 daemonize program = do name <- getProgName
                        args <- getArgs
                        process name args
     where
 
-      process name ["start"]   = startd name
-      process name ["stop"]    = 
+      process name ["start"] = startd name
+      process name ["stop"]  = 
           do pid <- pidRead name
              let ifdo x f = x >>= \x -> if x then f else pass
              case pid of
@@ -54,54 +44,54 @@ daemonize program = do name <- getProgName
                                ifdo (pidLive pid) (signalProcess sigKILL pid))
                    `finally`
                    removeLink (pidFile name)
-
-      process name ["reload"]  = 
-          do pid <- pidRead name
-             case pid of 
-               Nothing  -> pass
-               Just pid -> signalProcess sigHUP pid
-      process name ["restart"] = process name ["stop"] >>
-                                 process name ["start"]
+      process name ["restart"] = do process name ["stop"]
+                                    process name ["start"]
       process name _ = 
-          putStrLn $ "usage: " ++ name ++ " {start|stop|restart|reload}"
+          putStrLn $ "usage: " ++ name ++ " {start|stop|restart}"
 
-      startd name = pidExists name >>= decide
+      startd name = pidExists name >>= p1
           where
 
-            decide False = 
+            p1 False = 
                 do setFileCreationMask 0 
                    forkProcess p2
-                   exitSuccess
-            decide True = 
+                   exitImmediately ExitSuccess
+
+            p1 True = 
                 error "PID file exists. Process already running?"
-                exitFailure
+                exitImmediately ExitFailure
 
             p2 = do createSession
                     pid <- forkProcess p3
                     pidWrite name pid
-                    exitSuccess        
+                    exitImmediately ExitSuccess
 
             p3 = withSyslog name [] DAEMON $ 
-                do setCurrentDirectory "/"
-                   p <- program (syslog Notice)
-                   installHandler sigPIPE Ignore Nothing
-                   installHandler sigHUP (Catch $ reload p) Nothing
-                   installHandler sigTERM (Catch $ stop p) Nothing
+                do changeWorkingDirectory "/"
                    dropPriviledges name
-                   devNullFd <- 
-                       openFd "/dev/null" ReadWrite Nothing defaultFileFlags
-                   mapM_ (closeAndDupTo devNullFd) $
-                             [stdInput, stdOutput, stdError]
-                   forever (syslog Error) (start p)
-                       where
-                         closeAndDupTo dupFd fd = closeFd fd >> dupTo dupFd fd
+                   closeFileDescriptors
+                   blockSignal sigHUP
+                   let log = syslog Notice 
+                   forever log (program log)
 
-            forever log prog = 
-                prog `finally` restart where
-                    restart = 
-                        do log "STOPPED UNEXPECTEDLY. RESTARTING IN 5 SECONDS..."
-                           usleep (5 * 10^6)
-                           forever log prog
+forever :: Logger -> IO () -> IO ()
+forever log program =     
+    program `catch` restart where
+        restart :: SomeException -> IO () 
+        restart e = 
+            do log ("Unexpected exception: " ++ show e)
+               log "Restarting in 5 seconds.."
+               usleep (5 * 10^6)
+               forever log program
+
+closeFileDescriptors :: IO ()
+closeFileDescriptors = 
+    do null <- openFd "/dev/null" ReadWrite Nothing defaultFileFlags
+       let sendTo fd' fd = closeFd fd >> dupTo fd' fd
+       mapM_ (sendTo null) $ [stdInput, stdOutput, stdError]
+
+blockSignal :: Signal -> IO () 
+blockSignal sig = installHandler sig Ignore Nothing >> pass
 
 getGroupID :: String -> IO (Maybe GroupID)
 getGroupID group = 
@@ -143,7 +133,7 @@ pidWrite name pid =
 
 pidLive :: CPid -> IO Bool
 pidLive pid = 
-    (getProcessPriority pid >> return True) `Control.Exception.catch` f where
+    (getProcessPriority pid >> return True) `catch` f where
         f :: IOException -> IO Bool
         f _ = return False
         
