@@ -15,7 +15,7 @@ Description:	Provides two functions that help writing better UNIX daemons,
 		command line handling, dropping privileges).
 Build-Type:	Simple
 Library
-  Build-Depends:	base, unix, haskell98, hsyslog
+  Build-Depends:	base, unix, haskell98, hsyslog, extensible-exceptions, Cabal >= 1.6
   Exposed-modules:
     System.Posix.Daemonize
 

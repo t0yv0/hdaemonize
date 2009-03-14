@@ -3,8 +3,9 @@ module System.Posix.Daemonize (Logger, Program, daemonize, serviced) where
 {- originally based on code from 
    http://sneakymustard.com/2008/12/11/haskell-daemons -}
 
+
 import Control.Concurrent
-import Control.Exception
+import Control.Exception.Extensible
 import Prelude hiding (catch)
 import System
 import System.Exit
@@ -30,13 +31,13 @@ daemonize program =
 
     do setFileCreationMask 0 
        forkProcess p
-       exitSuccess
+       exitImmediately ExitSuccess
 
     where
 
       p  = do createSession
               forkProcess p'
-              exitSuccess
+              exitImmediately ExitSuccess
                               
       p' = do changeWorkingDirectory "/"
               closeFileDescriptors
@@ -80,7 +81,7 @@ serviced program = do name <- getProgName
 
       process name ["start"] = pidExists name >>= f where
           f True  = do error "PID file exists. Process already running?"
-                       exitFailure
+                       exitImmediately (ExitFailure 1)
           f False = daemonize (program' name)
                  
       process name ["stop"]  = 
