@@ -1,6 +1,6 @@
 Name:		hdaemonize
-Version:	0.1
-Cabal-Version:  >= 1.2
+Version:	0.2
+Cabal-Version:  >= 1.6
 License:	BSD3
 License-file:   LICENSE
 Author:         Anton Tayanovskyy
@@ -14,8 +14,9 @@ Description:	Provides two functions that help writing better UNIX daemons,
 		more (syslog interface, PID file writing, start-stop-restart 
 		command line handling, dropping privileges).
 Build-Type:	Simple
+Extra-Source-Files:	README
 Library
-  Build-Depends:	base, unix, haskell98, hsyslog, extensible-exceptions, Cabal >= 1.6
+  Build-Depends:	base, unix, haskell98, hsyslog, extensible-exceptions
   Exposed-modules:
     System.Posix.Daemonize
 
