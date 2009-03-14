@@ -1,8 +1,19 @@
 `hdaemonize-0.2`
-===============
+=================
 
 `hdaemonize` is a simple library that hides some of the complexities
-of writing UNIX daemons in Haskell.  The synopsis is:
+of writing UNIX daemons in Haskell.  
+
+Obtaining
+-----------
+
+The latest version is available (BSD license) at
+[GitHub](http://github.com/toyvo/hdaemonize/tree/master). 
+
+Using
+-------
+
+The synopsis is:
 
     import System.Posix.Daemonize
     main = daemonize $ program
@@ -67,7 +78,8 @@ Changelog
 Authors
 -------
 
-Anton Tayanovskyy <name.surname@gmail.com>
+Anton Tayanovskyy <name.surname@gmail.com>, bug reports and feature
+requests welcome.
 
 The code is originally based on a public posting by
 [Andre Nathan](http://sneakymustard.com/), used by permission.
