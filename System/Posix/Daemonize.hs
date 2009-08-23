@@ -1,11 +1,17 @@
-module System.Posix.Daemonize (Logger, Program, daemonize, serviced) where
+{-# LANGUAGE ForeignFunctionInterface #-}
+module System.Posix.Daemonize (Logger, Program, daemonize, serviced
+                              , dropPrivileges, getUserID, getGroupID
+                              ) where
       
 {- originally based on code from 
    http://sneakymustard.com/2008/12/11/haskell-daemons -}
 
 
 import Control.Concurrent
-import Control.Exception.Extensible
+import Control.Exception.Extensible as E
+import Control.Monad(when)
+import Foreign
+import Foreign.C
 import Prelude hiding (catch)
 import System
 import System.Exit
@@ -76,7 +82,7 @@ serviced program = do name <- getProgName
                       do let log = syslog Notice
                          log "starting"
                          pidWrite name
-                         dropPrivileges name
+                         dropPrivilegesMaybeToDaemon name
                          forever log program
 
       process name ["start"] = pidExists name >>= f where
@@ -139,14 +145,30 @@ getUserID user =
         f (Left e)    = Nothing
         f (Right uid) = Just uid
 
+
+dropPrivilegesMaybeToDaemon :: String -> IO ()
+dropPrivilegesMaybeToDaemon name = either eh return =<< E.try (dropPrivileges name)
+    where eh :: E.SomeException -> IO ()
+          eh _ = dropPrivileges "daemon"
+
+-- | Set uid and gid to the name of the user and group specified. 
+--   Throws an exception if it fails.
 dropPrivileges :: String -> IO ()
-dropPrivileges name = 
-    do Just ud <- getUserID "daemon"
-       Just gd <- getGroupID "daemon"
-       u       <- fmap (maybe ud id) $ getUserID name
-       g       <- fmap (maybe gd id) $ getGroupID name
-       setGroupID g 
-       setUserID u
+dropPrivileges name = do
+    do uid <- maybe (fail "Failed to get uid!") return =<< getUserID  name
+       gid <- maybe (fail "Failed to get gid!") return =<< getGroupID name
+       throwErrnoIfMinus1_ "setresgid" $ setresgid gid gid gid
+       throwErrnoIfMinus1_ "setresuid" $ setresuid uid uid uid
+       let pc x p = peek p >>= \pv -> when (pv /= x) $ fail "Setting permissions failed!"
+       alloca $ \a -> alloca $ \b -> alloca $ \c -> do throwErrnoIfMinus1_ "getresuid" $ getresuid a b c
+                                                       pc uid a >> pc uid b >> pc uid c
+       alloca $ \a -> alloca $ \b -> alloca $ \c -> do throwErrnoIfMinus1_ "getresgid" $ getresgid a b c
+                                                       pc gid a >> pc gid b >> pc gid c
+
+foreign import ccall setresuid :: CUid -> CUid -> CUid -> IO CInt
+foreign import ccall setresgid :: CGid -> CGid -> CGid -> IO CInt
+foreign import ccall getresuid :: Ptr CUid -> Ptr CUid -> Ptr CUid -> IO CInt
+foreign import ccall getresgid :: Ptr CGid -> Ptr CGid -> Ptr CGid -> IO CInt
 
 pidFile:: String -> String
 pidFile name = "/var/run/" ++ name ++ ".pid"
