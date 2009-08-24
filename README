@@ -67,6 +67,10 @@ prefers to use those of `mydaemon`, if present.
 Changelog
 ---------
 
+* 0.3
+    * Accepted a patch from Taru Karttunen: more API exposed, drop
+      privileges fixed
+
 * 0.2
     * provided documentation
     * backported to older GHC versions, tested on 6.8.1
