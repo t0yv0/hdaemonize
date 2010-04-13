@@ -10,8 +10,33 @@ import Prelude hiding (catch)
 import System
 import System.Exit
 import System.Posix
-import System.Posix.Syslog
+import System.Posix.Syslog (withSyslog,Option(..),Priority(..),Facility(..),syslog)
+import System.Posix.Types (UserID, GroupID)
+import Data.Maybe (isNothing, fromMaybe, fromJust)
 
+-- | You can simply daemonize any `IO ()` value with the `daemonize` function below, but for more sophistication, use the `serviced` function.  `serviced` takes a `CreateDaemon` record to describe how the daemon should be initialized.
+
+data CreateDaemon = CreateDaemon {
+  name :: Maybe String, -- If Nothing, defaults to the value of getProgName
+  user :: Maybe String, -- If Nothing, defaults to user = daemonName, otherwise "daemon"
+  group :: Maybe String,
+  syslogOptions :: [Option],
+  pidfileDirectory :: FilePath,
+  sigtermTimeout :: Int, -- measured in us, any value below 10^6 is treated as 10^6
+  program :: Program
+}
+
+simpleDaemon :: Program -> CreateDaemon
+simpleDaemon p = CreateDaemon {
+  name = Nothing,
+  user = Nothing,
+  group = Nothing,
+  syslogOptions = [PID],
+  pidfileDirectory = "/var/run",
+  sigtermTimeout = 4*10^6,
+  program = p
+}
+  
 
 -- | The simplest possible interface to syslog.
 type Logger = String -> IO ()
@@ -26,12 +51,12 @@ type Program = Logger -> IO ()
 --   mask, starting a new session, and changing the working directory
 --   to root.
 
-daemonize :: IO () ->  IO () 
+daemonize :: IO () -> IO () 
 daemonize program = 
-
-    do setFileCreationMask 0 
-       forkProcess p
-       exitImmediately ExitSuccess
+    
+  do setFileCreationMask 0 
+     forkProcess p
+     exitImmediately ExitSuccess
 
     where
 
@@ -42,7 +67,7 @@ daemonize program =
       p' = do changeWorkingDirectory "/"
               closeFileDescriptors
               blockSignal sigHUP
-              program
+              program 
 
 
 -- | Turns a program into a UNIX daemon (system service) ready to be
@@ -66,26 +91,33 @@ daemonize program =
 --   Finally, exceptions in the program are caught, logged to syslog,
 --   and the program restarted.
 
-serviced :: Program -> IO ()
-serviced program = do name <- getProgName
-                      args <- getArgs
-                      process name args
-    where
+fromMaybeM :: Monad m => m a -> Maybe a -> m a
+fromMaybeM def Nothing = def
+fromMaybeM _ (Just x)  = return x
 
-      program' name = withSyslog name [] DAEMON $
+serviced :: CreateDaemon -> IO ()
+serviced daemon = do 
+  systemName <- getProgName
+  let daemon' = daemon { name = if isNothing (name daemon) 
+                                then Just systemName else name daemon }
+  args <- getArgs
+  process daemon' args
+    where
+      
+      program' daemon = withSyslog (fromJust $ name daemon) (syslogOptions daemon) DAEMON $
                       do let log = syslog Notice
                          log "starting"
-                         pidWrite name
-                         dropPrivileges name
-                         forever log program
+                         pidWrite daemon
+                         dropPrivileges daemon
+                         forever log (program daemon)
 
-      process name ["start"] = pidExists name >>= f where
+      process daemon ["start"] = pidExists (fromJust $ name daemon) >>= f where
           f True  = do error "PID file exists. Process already running?"
                        exitImmediately (ExitFailure 1)
-          f False = daemonize (program' name)
+          f False = daemonize (program' daemon)
                  
-      process name ["stop"]  = 
-          do pid <- pidRead name
+      process daemon ["stop"]  = 
+          do pid <- pidRead (fromJust $ name daemon)
              let ifdo x f = x >>= \x -> if x then f else pass
              case pid of
                Nothing  -> pass
@@ -93,15 +125,15 @@ serviced program = do name <- getProgName
                    (do signalProcess sigTERM pid
                        usleep (10^6)
                        ifdo (pidLive pid) $ 
-                            do usleep (3*10^6)
+                            do usleep $ (sigtermTimeout daemon - 10^6) `max` 0
                                ifdo (pidLive pid) (signalProcess sigKILL pid))
                    `finally`
-                   removeLink (pidFile name)
+                   removeLink (pidFile $ fromJust $ name daemon)
 
-      process name ["restart"] = do process name ["stop"]
-                                    process name ["start"]
-      process name _ = 
-          putStrLn $ "usage: " ++ name ++ " {start|stop|restart}"
+      process daemon ["restart"] = do process daemon ["stop"]
+                                      process daemon ["start"]
+      process daemon _ = 
+        getProgName >>= \pname -> putStrLn $ "usage: " ++ pname ++ " {start|stop|restart}"
 
 
 {- implementation -}
@@ -139,12 +171,14 @@ getUserID user =
         f (Left e)    = Nothing
         f (Right uid) = Just uid
 
-dropPrivileges :: String -> IO ()
-dropPrivileges name = 
+dropPrivileges :: CreateDaemon -> IO ()
+dropPrivileges daemon = 
     do Just ud <- getUserID "daemon"
        Just gd <- getGroupID "daemon"
-       u       <- fmap (maybe ud id) $ getUserID name
-       g       <- fmap (maybe gd id) $ getGroupID name
+       let targetUser = fromMaybe (fromJust $ name daemon) (user daemon)
+           targetGroup = fromMaybe (fromJust $ name daemon) (group daemon)
+       u       <- fmap (maybe ud id) $ getUserID targetUser
+       g       <- fmap (maybe gd id) $ getGroupID targetGroup
        setGroupID g 
        setUserID u
 
@@ -159,10 +193,10 @@ pidRead name = pidExists name >>= choose where
     choose True  = fmap (Just . read) $ readFile (pidFile name)
     choose False = return Nothing
 
-pidWrite :: String -> IO ()
-pidWrite name =
+pidWrite :: CreateDaemon -> IO ()
+pidWrite daemon =
     getProcessID >>= \pid ->
-    writeFile (pidFile name) (show pid)
+    writeFile (pidFile $ fromJust $ name daemon) (show pid)
 
 pidLive :: CPid -> IO Bool
 pidLive pid = 
