@@ -39,7 +39,7 @@ simpleDaemon p = CreateDaemon {
   
 
 -- | The simplest possible interface to syslog.
-type Logger = String -> IO ()
+type Logger = Priority -> String -> IO ()
 
 
 -- | A program is any IO computation. It also accepts a syslog handle.
@@ -109,7 +109,7 @@ serviced daemon = do
                          log "starting"
                          pidWrite daemon
                          dropPrivileges daemon
-                         forever log (program daemon)
+                         forever syslog (program daemon)
 
       process daemon ["start"] = pidExists (fromJust $ name daemon) >>= f where
           f True  = do error "PID file exists. Process already running?"
@@ -143,8 +143,8 @@ forever log program =
     program log `catch` restart where
         restart :: SomeException -> IO () 
         restart e = 
-            do log ("unexpected exception: " ++ show e)
-               log "restarting in 5 seconds"
+            do log Error ("unexpected exception: " ++ show e)
+               log Error "restarting in 5 seconds"
                usleep (5 * 10^6)
                forever log program
 
