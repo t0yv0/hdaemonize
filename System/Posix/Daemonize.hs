@@ -1,4 +1,43 @@
-module System.Posix.Daemonize (Logger, Program, daemonize, serviced) where
+module System.Posix.Daemonize (
+  -- * Simple daemonization
+  daemonize, 
+  -- * Building system services
+  serviced, CreateDaemon(..), simpleDaemon
+  
+  -- * An example                              
+  --                               
+  -- | Here is an example of a full program which writes a message to
+  -- syslog once a second proclaiming its continued existance, and
+  -- which installs its own SIGHUP handler.  Note that you won't
+  -- actually see the message once a second in the log on most
+  -- systems.  @syslogd@ detects repeated messages and prints the
+  -- first one, then delays for the rest and eventually writes a line
+  -- about how many times it has seen it.
+  --                               
+  -- > module Main where
+  -- >
+  -- > import System.Posix.Daemonize (CreateDaemon(..), serviced, simpleDaemon)
+  -- > import System.Posix.Signals (installHandler, Handler(Catch), sigHUP, fullSignalSet)
+  -- > import System.Posix.Syslog (syslog, Priority(Notice))
+  -- > import Control.Concurrent (threadDelay)
+  -- > import Control.Monad (forever)
+  -- > 
+  -- > main :: IO ()
+  -- > main = serviced stillAlive
+  -- > 
+  -- > stillAlive :: CreateDaemon
+  -- > stillAlive = simpleDaemon { program = stillAliveMain }
+  -- > 
+  -- > stillAliveMain :: IO ()
+  -- > stillAliveMain = do
+  -- >   installHandler sigHUP (Catch taunt) (Just fullSignalSet)
+  -- >   forever $ do threadDelay (10^6)
+  -- >                syslog Notice "I'm still alive!"
+  -- >                
+  -- > taunt :: IO ()
+  -- > taunt = syslog Notice "I sneeze in your general direction, you and your SIGHUP."
+
+  ) where
       
 {- originally based on code from 
    http://sneakymustard.com/2008/12/11/haskell-daemons -}
@@ -6,50 +45,35 @@ module System.Posix.Daemonize (Logger, Program, daemonize, serviced) where
 
 import Control.Concurrent
 import Control.Exception.Extensible
+import qualified Control.Monad as M (forever)
 import Prelude hiding (catch)
 import System
 import System.Exit
 import System.Posix
 import System.Posix.Syslog (withSyslog,Option(..),Priority(..),Facility(..),syslog)
 import System.Posix.Types (UserID, GroupID)
+import System.FilePath.Posix (FilePath,joinPath)
 import Data.Maybe (isNothing, fromMaybe, fromJust)
 
--- | You can simply daemonize any `IO ()` value with the `daemonize` function below, but for more sophistication, use the `serviced` function.  `serviced` takes a `CreateDaemon` record to describe how the daemon should be initialized.
 
-data CreateDaemon = CreateDaemon {
-  name :: Maybe String, -- If Nothing, defaults to the value of getProgName
-  user :: Maybe String, -- If Nothing, defaults to user = daemonName, otherwise "daemon"
-  group :: Maybe String,
-  syslogOptions :: [Option],
-  pidfileDirectory :: FilePath,
-  sigtermTimeout :: Int, -- measured in us, any value below 10^6 is treated as 10^6
-  program :: Program
-}
-
-simpleDaemon :: Program -> CreateDaemon
-simpleDaemon p = CreateDaemon {
-  name = Nothing,
-  user = Nothing,
-  group = Nothing,
-  syslogOptions = [PID],
-  pidfileDirectory = "/var/run",
-  sigtermTimeout = 4*10^6,
-  program = p
-}
-  
-
--- | The simplest possible interface to syslog.
-type Logger = Priority -> String -> IO ()
-
-
--- | A program is any IO computation. It also accepts a syslog handle.
-type Program = Logger -> IO ()
-
-
--- | Daemonizes a given IO computation by forking twice, closing
---   standard file descriptors, blocking sigHUP, setting file creation
---   mask, starting a new session, and changing the working directory
---   to root.
+-- | Turning a process into a daemon involves a fixed set of
+-- operations on unix systems, described in section 13.3 of Stevens
+-- and Rago, "Advanced Programming in the Unix Environment."  Since
+-- they are fixed, they can be written as a single function,
+-- 'daemonize' taking an 'IO' action which represents the daemon's
+-- actual activity.
+-- 
+-- Briefly, 'daemonize' sets the file creation mask to 0, forks twice,
+-- changed the working directory to @/@, closes stdin, stdout, and
+-- stderr, blocks 'sigHUP', and runs its argument.  Strictly, it
+-- should close all open file descriptors, but this is not possible in
+-- a sensible way in Haskell.
+-- 
+-- The most trivial daemon would be
+-- 
+-- > daemonize (forever $ return ())
+-- 
+-- which does nothing until killed.
 
 daemonize :: IO () -> IO () 
 daemonize program = 
@@ -70,30 +94,42 @@ daemonize program =
               program 
 
 
--- | Turns a program into a UNIX daemon (system service) ready to be
---   deployed to /etc/rc.d or similar startup folder.  The resulting
---   program handles command-line arguments (start, stop, or restart).
+
+
+-- | 'serviced' turns a program into a UNIX daemon (system service)
+--   ready to be deployed to /etc/rc.d or similar startup folder.  It
+--   is meant to be used in the @main@ function of a program, such as
+-- 
+-- > serviced simpleDaemon
+-- 
+--   The resulting program takes one of three argments: @start@,
+--   @stop@, and @restart@.  All control the status of a daemon by
+--   looking for a file containing a text string holding the PID of
+--   any running instance.  Conventionally, this file is in
+--   @/var/run/$name.pid@, where $name is the executable's name.  For
+--   obvious reasons, this file is known as a PID file.
 --
---   With start option it writes out a PID to /var/run/$name.pid where
---   $name is the executable name. If PID already exists, it refuses
---   to start, guaranteeing there is only one live instance.
+--   @start@ makes the program write a PID file.  If the file already
+--   exists, it refuses to start, guaranteeing there is only one
+--   instance of the daemon at any time.
 --
---   With stop option it reads the PID from /var/run/$name.pid and
---   terminates the corresponding process (first a soft kill, SIGTERM,
---   then a hard kill, SIGKILL).
---
---   Another addition over the daemonize function is dropping
---   privileges.  If a system user and group with a name that matches
---   the executable name exist, privileges are dropped to that user and
---   group.  Otherwise, they are dropped to the standard daemon user
---   and group.
---
+--   @stop@ read the PID file, and terminates the process whose pid is
+--   written therein.  First it does a soft kill, SIGTERM, giving the
+--   daemon a chance to shut down cleanly, then three seconds later a
+--   hard kill which the daemon cannot catch or escape.
+-- 
+--   @restart@ is simple @stop@ followed by @start@.
+-- 
+--   'serviced' also tries to drop privileges.  If you don't specify a
+--   user the daemon should run as, it will try to switch to a user
+--   with the same name as the daemon, and otherwise to user @daemon@.
+--   It goes through the same sequence for group.  Just to complicate
+--   matters, the name of the daemon is by default the name of the
+--   executable file, but can again be set to something else in the
+--   'CreateDaemon' record.
+-- 
 --   Finally, exceptions in the program are caught, logged to syslog,
 --   and the program restarted.
-
-fromMaybeM :: Monad m => m a -> Maybe a -> m a
-fromMaybeM def Nothing = def
-fromMaybeM _ (Just x)  = return x
 
 serviced :: CreateDaemon -> IO ()
 serviced daemon = do 
@@ -109,15 +145,15 @@ serviced daemon = do
                          log "starting"
                          pidWrite daemon
                          dropPrivileges daemon
-                         forever syslog (program daemon)
+                         forever (program daemon)
 
-      process daemon ["start"] = pidExists (fromJust $ name daemon) >>= f where
+      process daemon ["start"] = pidExists daemon >>= f where
           f True  = do error "PID file exists. Process already running?"
                        exitImmediately (ExitFailure 1)
           f False = daemonize (program' daemon)
                  
       process daemon ["stop"]  = 
-          do pid <- pidRead (fromJust $ name daemon)
+          do pid <- pidRead daemon
              let ifdo x f = x >>= \x -> if x then f else pass
              case pid of
                Nothing  -> pass
@@ -125,28 +161,93 @@ serviced daemon = do
                    (do signalProcess sigTERM pid
                        usleep (10^6)
                        ifdo (pidLive pid) $ 
-                            do usleep $ (sigtermTimeout daemon - 10^6) `max` 0
+                            do usleep (3*10^6)
                                ifdo (pidLive pid) (signalProcess sigKILL pid))
                    `finally`
-                   removeLink (pidFile $ fromJust $ name daemon)
+                   removeLink (pidFile daemon)
 
       process daemon ["restart"] = do process daemon ["stop"]
                                       process daemon ["start"]
       process daemon _ = 
         getProgName >>= \pname -> putStrLn $ "usage: " ++ pname ++ " {start|stop|restart}"
 
+-- | The details of any given daemon are fixed by the 'CreateDaemon'
+-- record passed to 'serviced'.  You can also take a predefined form
+-- of 'CreateDaemon', such as 'simpleDaemon' below, and set what
+-- options you want, rather than defining the whole record yourself.
+data CreateDaemon = CreateDaemon {
+  program :: IO (), -- ^ The actual guts of the daemon, more or less
+                    -- the @main@ function.
+  name :: Maybe String, -- ^ The name of the daemon, which is used as
+                        -- the name for the PID file, as the name that
+                        -- appears in the system logs, and as the user
+                        -- and group the daemon tries to run as if
+                        -- none are explicitly specified.  In general,
+                        -- this should be 'Nothing', in which case the
+                        -- system defaults to the name of the
+                        -- executable file containing the daemon.
+  user :: Maybe String, -- ^ Most daemons are initially run as root,
+                        -- and try to change to another user so they
+                        -- have fewer privileges and represent less of
+                        -- a security threat.  This field specifies
+                        -- which user it should try to run as.  If it
+                        -- is 'Nothing', or if the user does not exist
+                        -- on the system, it next tries to become a
+                        -- user with the same name as the daemon, and
+                        -- if that fails, the user @daemon@.
+  group :: Maybe String, -- ^ 'group' is the group the daemon should
+                         -- try to run as, and works the same way as
+                         -- the user field.
+  syslogOptions :: [Option], -- ^ The options the daemon should set on
+                             -- syslog.  You can safely leave this as @[]@.
+  pidfileDirectory :: Maybe FilePath -- ^ The directory where the
+                                     -- daemon should write and look
+                                     -- for the PID file.  'Nothing'
+                                     -- means @/var/run@.  Unless you
+                                     -- have a good reason to do
+                                     -- otherwise, leave this as
+                                     -- 'Nothing'.
+}
+
+-- | The simplest possible instance of 'CreateDaemon' is 
+-- 
+-- > CreateDaemon {
+-- >  program = forever $ return ()
+-- >  name = Nothing,
+-- >  user = Nothing,
+-- >  group = Nothing,
+-- >  syslogOptions = [],
+-- >  pidfileDirectory = Nothing,
+-- > }
+-- 
+-- which does nothing forever with all default settings.  We give it a
+-- name, 'simpleDaemon', since you may want to use it as a template
+-- and modify only the fields that you need.
+
+simpleDaemon :: CreateDaemon
+simpleDaemon = CreateDaemon {
+  name = Nothing,
+  user = Nothing,
+  group = Nothing,
+  syslogOptions = [],
+  pidfileDirectory = Nothing,
+  program = M.forever $ return ()
+}
+  
+
+
 
 {- implementation -}
 
-forever :: Logger -> Program -> IO ()
-forever log program =     
-    program log `catch` restart where
+forever :: IO () -> IO ()
+forever program =     
+    program `catch` restart where
         restart :: SomeException -> IO () 
         restart e = 
-            do log Error ("unexpected exception: " ++ show e)
-               log Error "restarting in 5 seconds"
+            do syslog Error ("unexpected exception: " ++ show e)
+               syslog Error "restarting in 5 seconds"
                usleep (5 * 10^6)
-               forever log program
+               forever program
 
 closeFileDescriptors :: IO ()
 closeFileDescriptors = 
@@ -182,21 +283,22 @@ dropPrivileges daemon =
        setGroupID g 
        setUserID u
 
-pidFile:: String -> String
-pidFile name = "/var/run/" ++ name ++ ".pid"
+pidFile:: CreateDaemon -> String
+pidFile daemon = joinPath [dir, (fromJust $ name daemon) ++ ".pid"]
+  where dir = fromMaybe "/var/run" (pidfileDirectory daemon)
 
-pidExists :: String -> IO Bool
-pidExists name = fileExist (pidFile name)
+pidExists :: CreateDaemon -> IO Bool
+pidExists daemon = fileExist (pidFile daemon)
 
-pidRead :: String -> IO (Maybe CPid)
-pidRead name = pidExists name >>= choose where
-    choose True  = fmap (Just . read) $ readFile (pidFile name)
+pidRead :: CreateDaemon -> IO (Maybe CPid)
+pidRead daemon = pidExists daemon >>= choose where
+    choose True  = fmap (Just . read) $ readFile (pidFile daemon)
     choose False = return Nothing
 
 pidWrite :: CreateDaemon -> IO ()
 pidWrite daemon =
     getProcessID >>= \pid ->
-    writeFile (pidFile $ fromJust $ name daemon) (show pid)
+    writeFile (pidFile daemon) (show pid)
 
 pidLive :: CPid -> IO Bool
 pidLive pid = 
