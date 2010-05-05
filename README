@@ -67,6 +67,9 @@ prefers to use those of `mydaemon`, if present.
 Changelog
 ---------
 
+* 0.3
+    * merged with updates by madhadron
+
 * 0.2
     * provided documentation
     * backported to older GHC versions, tested on 6.8.1
